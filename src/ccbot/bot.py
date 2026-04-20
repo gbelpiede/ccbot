@@ -483,6 +483,84 @@ async def topic_edited_handler(
     )
 
 
+# --- BEGIN wa+outbox handlers (fork-specific, added 2026-04-20) ---
+import subprocess as _shell_subprocess
+
+
+async def _run_shell(binary: str, args: list[str], timeout: int = 15) -> str:
+    """Run a local binary, return formatted reply text."""
+    try:
+        result = _shell_subprocess.run(
+            [binary, *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except _shell_subprocess.TimeoutExpired:
+        return f"⚠ {binary} timed out after {timeout}s"
+    except Exception as exc:
+        return f"⚠ {binary} exec failed: {exc}"
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    if result.returncode != 0:
+        return f"⚠ {binary} failed (exit {result.returncode}):\n{stderr or stdout or '(no output)'}"
+    return stdout or "(no output)"
+
+
+def _valid_id(s: str) -> bool:
+    return all(c.isalnum() or c in "-_" for c in s)
+
+
+async def wa_list_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        return
+    if not update.message:
+        return
+    reply = await _run_shell("/home/claude/.local/bin/wa", ["list"])
+    await safe_reply(update.message, f"⚛ wa list:\n\n{reply}")
+
+
+async def wa_cancel_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        return
+    if not update.message:
+        return
+    args = (update.message.text or "").split()[1:]
+    if not args:
+        await safe_reply(update.message, "Usage: /wa_cancel <id>  (get id from /wa_list)")
+        return
+    msg_id = args[0]
+    if not _valid_id(msg_id):
+        await safe_reply(update.message, "⚠ invalid id format")
+        return
+    reply = await _run_shell("/home/claude/.local/bin/wa", ["cancel", msg_id])
+    await safe_reply(update.message, f"⚛ wa cancel {msg_id}:\n\n{reply}")
+
+
+async def outbox_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        return
+    if not update.message:
+        return
+    args = (update.message.text or "").split()[1:]
+    sub = args[0] if args else "list"
+    if sub not in {"list", "cancel", "count"}:
+        await safe_reply(update.message, f"Usage: /outbox [list|cancel <id>|count]  (got: {sub})")
+        return
+    for a in args:
+        if not _valid_id(a):
+            await safe_reply(update.message, "⚠ invalid arg format")
+            return
+    reply = await _run_shell("/home/claude/.local/bin/outbox", args or ["list"], timeout=10)
+    await safe_reply(update.message, f"⚛ outbox:\n\n{reply}")
+
+
+# --- END wa+outbox handlers ---
+
+
 async def forward_command_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -1911,6 +1989,10 @@ def create_bot() -> Application:
             topic_edited_handler,
         )
     )
+    # wa+outbox fork handlers: register BEFORE forward_command_handler catch-all
+    application.add_handler(CommandHandler("wa_list", wa_list_command))
+    application.add_handler(CommandHandler("wa_cancel", wa_cancel_command))
+    application.add_handler(CommandHandler("outbox", outbox_command))
     # Forward any other /command to Claude Code
     application.add_handler(MessageHandler(filters.COMMAND, forward_command_handler))
     application.add_handler(

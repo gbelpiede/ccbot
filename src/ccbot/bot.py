@@ -561,6 +561,122 @@ async def outbox_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) ->
 # --- END wa+outbox handlers ---
 
 
+# --- BEGIN wa-patch (added 2026-04-20 for whatsapp-cli path B) ---
+import subprocess as _wa_subprocess
+
+
+async def _run_wa(args: list[str]) -> str:
+    """Run wa CLI subprocess on droplet, return formatted reply text."""
+    try:
+        result = _wa_subprocess.run(
+            ["/home/claude/.local/bin/wa", *args],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except _wa_subprocess.TimeoutExpired:
+        return "⚠ wa command timed out after 15s"
+    except Exception as exc:
+        return f"⚠ wa exec failed: {exc}"
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    if result.returncode != 0:
+        return f"⚠ wa failed (exit {result.returncode}):\n{stderr or stdout or '(no output)'}"
+    return stdout or "(no output)"
+
+
+async def wa_list_command(
+    update: Update, _context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Reply with pending wa schedule queue. Local subprocess, no Claude session."""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        return
+    if not update.message:
+        return
+    reply = await _run_wa(["list"])
+    await safe_reply(update.message, f"⚛ wa list:\n\n{reply}")
+
+
+async def wa_cancel_command(
+    update: Update, _context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Cancel a scheduled wa message by ID. Usage: /wa_cancel <id>"""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        return
+    if not update.message:
+        return
+    args = (update.message.text or "").split()[1:]
+    if not args:
+        await safe_reply(
+            update.message, "Usage: /wa_cancel <id>  (get id from /wa_list)"
+        )
+        return
+    msg_id = args[0]
+    if not msg_id.replace("-", "").replace("_", "").isalnum():
+        await safe_reply(update.message, "⚠ invalid id format")
+        return
+    reply = await _run_wa(["cancel", msg_id])
+    await safe_reply(update.message, f"⚛ wa cancel {msg_id}:\n\n{reply}")
+
+
+# --- END wa-patch ---
+
+
+# --- BEGIN outbox-patch (added 2026-04-20 for unified scheduled-message view) ---
+import subprocess as _outbox_subprocess
+
+
+async def _run_outbox(args: list[str]) -> str:
+    """Run outbox CLI subprocess on droplet, return formatted reply text."""
+    try:
+        result = _outbox_subprocess.run(
+            ["/home/claude/.local/bin/outbox", *args],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except _outbox_subprocess.TimeoutExpired:
+        return "⚠ outbox command timed out after 10s"
+    except Exception as exc:
+        return f"⚠ outbox exec failed: {exc}"
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    if result.returncode != 0:
+        return f"⚠ outbox failed (exit {result.returncode}):\n{stderr or stdout or '(no output)'}"
+    return stdout or "(no output)"
+
+
+async def outbox_command(
+    update: Update, _context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Reply with unified pending queue across channels. Args forwarded to outbox CLI."""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        return
+    if not update.message:
+        return
+    args = (update.message.text or "").split()[1:]
+    sub = args[0] if args else "list"
+    allowed = {"list", "cancel", "count"}
+    if sub not in allowed:
+        await safe_reply(
+            update.message,
+            f"Usage: /outbox [list|cancel <id>|count]  (got: {sub})",
+        )
+        return
+    for a in args:
+        if not all(c.isalnum() or c in "-_" for c in a):
+            await safe_reply(update.message, "⚠ invalid arg format")
+            return
+    reply = await _run_outbox(args or ["list"])
+    await safe_reply(update.message, f"⚛ outbox:\n\n{reply}")
+
+
+# --- END outbox-patch ---
+
+
 async def forward_command_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -1970,6 +2086,11 @@ def create_bot() -> Application:
     # wa+outbox fork handlers: register BEFORE forward_command_handler catch-all
     application.add_handler(CommandHandler("wa_list", wa_list_command))
     application.add_handler(CommandHandler("wa_cancel", wa_cancel_command))
+    application.add_handler(CommandHandler("outbox", outbox_command))
+    # wa-patch: register /wa_list + /wa_cancel BEFORE forward_command_handler catch-all
+    application.add_handler(CommandHandler("wa_list", wa_list_command))
+    application.add_handler(CommandHandler("wa_cancel", wa_cancel_command))
+    # outbox-patch: register /outbox BEFORE forward_command_handler catch-all
     application.add_handler(CommandHandler("outbox", outbox_command))
     # Forward any other /command to Claude Code
     application.add_handler(MessageHandler(filters.COMMAND, forward_command_handler))
